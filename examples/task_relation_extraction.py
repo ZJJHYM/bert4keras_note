@@ -33,9 +33,9 @@ from tqdm import tqdm
 
 maxlen = 128
 batch_size = 64
-checkpoint_path = "D:/model+pack/model+pack/model/chinese_L-12_H-768_A-12/bert_model.ckpt"
-config_path = "D:/model+pack/model+pack/model/chinese_L-12_H-768_A-12/bert_config.json"
-dict_path = "D:/model+pack/model+pack/model/chinese_L-12_H-768_A-12/vocab.txt"
+config_path = 'D:/DP/config/chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'D:/DP/config\chinese_L-12_H-768_A-12/bert_model.ckpt'
+dict_path = 'D:/DP/config/chinese_L-12_H-768_A-12/vocab.txt'
 
 
 def load_data(filename):
@@ -60,12 +60,12 @@ def load_data(filename):
 
 # 加载数据集
 # 得出每一条形式如：{'text': '如何演好自己的角色，请读《演员自我修养》《喜剧之王》周星驰崛起于穷困潦倒之中的独门秘笈', 'spo_list': [('喜剧之王', '主演', '周星驰')]}
-train_data = load_data('D:/DP/shuju/data/relation/train_data.json')
-valid_data = load_data('D:/DP/shuju/data/relation/dev_data.json')
+train_data = load_data('D:/DP/shuju/zhuojunjie-bert4keras-master/bert4keras/examples/datasets/relation/train_data.json')
+valid_data = load_data('D:/DP/shuju/zhuojunjie-bert4keras-master/bert4keras/examples/datasets/relation/dev_data.json')
 
 # 构造predicate2id，在data_generator中会使用
 predicate2id, id2predicate = {}, {}
-with codecs.open('D:/DP/shuju/data/relation/all_50_schemas',encoding='utf-8') as f:
+with codecs.open('D:/DP/shuju/zhuojunjie-bert4keras-master/bert4keras/examples/datasets/relation/all_50_schemas',encoding='utf-8') as f:
     for l in f:
         l = json.loads(l)
         if l['predicate'] not in predicate2id:
