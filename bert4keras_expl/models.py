@@ -1,11 +1,68 @@
 #! -*- coding: utf-8 -*-
 # 主要模型
+'''
+【AI-NLP】bert4keras源码解析
+bert4keras源码解析
+前言
+bert4keras是苏剑林通过keras封装Bert，可以更快速、更友好的使用Bert。
+bert4keras链接：https://github.com/bojone/bert4keras
+本文是对该链接下bert4keras/bert4keras/的源码进行解析
 
+在解析bert4keras源码前，需要各位具备如下知识：
+    BERT的基本原理(或Transformer原理)
+    Keras中层(Layer)的定义方式和使用(可以参考苏神科学空间的：“让Keras更酷一些！”：精巧的层与花式的回调：https://kexue.fm/archives/5765)
+    multiattention(可以参考本人写的：“基于keras的MultiAttention实现及实例”：https://zhuanlan.zhihu.com/p/231631291)
+Bert4keras框架
+bert4keras的总体架构由6个代码文件组成，主文件是models.py，其余的文件均为主文件服务，或者为下游任务的建模过程中服务。
+
+models.py：主文件，主体Transformer类，其余的都是以Transformer为父类实现其算法，包括BERT，ALBERT，NEZHA，ELECTRA，GPT2_ML，T5的算法及其优化
+
+layers.py: 实现各类功能的层，类似Keras中的layer，这里包括Embedding，MultiHeadAttention（多头注意力），LayerNormalization，PositionEmbedding（位置编码），RelativePositionEmbedding（相对位置编码），FeedForward等实现
+
+本篇从主文件models.py开始介绍
+
+一、Transformer类
+    Transformer类写好了bert等这类预训练模型的整体框架，主要在build，call两个函数中实现。
+    实现框架如下图
+
+
+    包括三大内容(在build函数中)：Input(输入)，self.call(算法计算流程)，Model(建模)
+
+apply函数的妙用：在Transformer类中的apply函数的妙用:通过apply调用层会自动重用同名层，每次层进来都会存储在self.layers字典中，相同名字的层会重复使用，这样很好用而且在后面的Albert中要共享参数的时候也方便实现。
+
+二、算法实现（以Bert为例）
+依照Transformer类的逻辑顺序：
+    1、Input(输入)
+        get_inputs函数：
+            实现bert的输入: token(x_in)和segment(s_in)
+            shape均为：shape=(btz, seq_len)
+            输出：[x_in, s_in]
+
+    2、self.call(算法计算流程)
+
+        1) apply_embedding：转成字向量
+            x embedding -- s embedding -- x&s add -- Position embedding -- LN -- dropout
+
+            输出shape=(btz, seq_len, hidden_size)
+
+        2) apply_main_layers：计算流程主体
+            循环num_hidden_layers次：
+                Bert计算主体：Att --> DROPOUT --> Add --> LN --> FFN --> DROPOUT --> Add --> LN
+            输出shape=(btz, seq_len, intermediate_size)
+
+        3) apply_final_layers：根据下流任务调整输出
+            with_pool:提取CLS向量，用CLS向量表示这句话的句向量 shape=(btz, 768)
+            with_nsp:预测是否是下一句，shape=(btz, 2)
+            with_mask:Mask LM mask语言模型，在预训练的时候会用到，或者要预测句中某个字或词的时候可以用到
+
+    3、Model(建模)：Keras标准写法
+        Model(self.inputs, self.outputs, name=self.name)
+代码及矩阵张量运算见代码注释：
+
+'''
 import numpy as np
 from bert4keras.layers import *
-from bert4keras.snippets import insert_arguments
 from bert4keras.snippets import delete_arguments
-from bert4keras.snippets import is_string
 from keras.models import Model
 import json
 
@@ -13,30 +70,28 @@ import json
 class Transformer(object):
     """模型基类
     """
+
     def __init__(
-        self,
-        vocab_size,  # 词表大小
-        hidden_size,  # 编码维度
-        num_hidden_layers,  # Transformer总层数
-        num_attention_heads,  # Attention的头数
-        intermediate_size,  # FeedForward的隐层维度
-        hidden_act,  # FeedForward隐层的激活函数
-        dropout_rate=None,  # Dropout比例
-        embedding_size=None,  # 是否指定embedding_size
-        attention_key_size=None,  # Attention中Q,K的head_size
-        sequence_length=None,  # 是否固定序列长度
-        keep_tokens=None,  # 要保留的词ID列表
-        compound_tokens=None,  # 扩展Embedding
-        layers=None,  # 外部传入的Keras层
-        prefix=None,  # 层名前缀
-        name=None,  # 模型名称
-        **kwargs
+            self,
+            vocab_size,  # 词表大小
+            hidden_size,  # 编码维度
+            num_hidden_layers,  # Transformer总层数
+            num_attention_heads,  # Attention的头数
+            intermediate_size,  # FeedForward的隐层维度
+            hidden_act,  # FeedForward隐层的激活函数
+            dropout_rate=None,  # Dropout比例
+            embedding_size=None,  # 是否指定embedding_size
+            attention_key_size=None,  # Attention中Q,K的head_size
+            sequence_length=None,  # 是否固定序列长度
+            keep_tokens=None,  # 要保留的词ID列表
+            layers=None,  # 外部传入的Keras层
+            name=None,  # 模型名称
+            **kwargs
     ):
-        if keep_tokens is not None:
-            vocab_size = len(keep_tokens)
-        if compound_tokens is not None:
-            vocab_size += len(compound_tokens)
-        self.vocab_size = vocab_size
+        if keep_tokens is None:
+            self.vocab_size = vocab_size
+        else:
+            self.vocab_size = len(keep_tokens)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -48,21 +103,19 @@ class Transformer(object):
         self.embedding_size = embedding_size or hidden_size
         self.sequence_length = sequence_length
         self.keep_tokens = keep_tokens
-        self.compound_tokens = compound_tokens
         self.attention_mask = None
         self.position_bias = None
         self.layers = {} if layers is None else layers
-        self.prefix = prefix or ''
         self.name = name
         self.built = False
 
     def build(
-        self,
-        layer_norm_cond=None,
-        layer_norm_cond_hidden_size=None,
-        layer_norm_cond_hidden_act=None,
-        additional_input_layers=None,
-        **kwargs
+            self,
+            layer_norm_cond=None,
+            layer_norm_cond_hidden_size=None,
+            layer_norm_cond_hidden_act=None,
+            additional_input_layers=None,
+            **kwargs
     ):
         """模型构建函数
         layer_norm_*系列参数为实现Conditional Layer Normalization时使用，
@@ -72,7 +125,7 @@ class Transformer(object):
             return None
         # Input
         inputs = self.get_inputs()
-        self.set_inputs(inputs, additional_input_layers)
+        self.set_inputs(inputs, additional_input_layers)  # 多余的层需要叠加进来 貌似是mask
         # Other
         self.layer_norm_conds = [
             layer_norm_cond,
@@ -98,13 +151,7 @@ class Transformer(object):
         outputs = self.apply_final_layers(outputs)
         return outputs
 
-    def prefixed(self, name):
-        """给名字加前缀
-        """
-        if name is not None:
-            return self.prefix + name
-
-    def apply(self, inputs=None, layer=None, arguments=None, **kwargs):
+    def apply(self, inputs, layer=None, arguments=None, **kwargs):
         """通过apply调用层会自动重用同名层
         inputs: 上一层的输出；
         layer: 要调用的层类名；
@@ -115,17 +162,13 @@ class Transformer(object):
             return inputs
 
         arguments = arguments or {}
-        name = self.prefixed(kwargs.get('name'))
-        kwargs['name'] = name
+        name = kwargs.get('name')  # name='Embedding-Token'
         if name not in self.layers:
             layer = layer(**kwargs)
             name = layer.name
-            self.layers[name] = layer
+            self.layers[name] = layer  # 保存下来
 
-        if inputs is None:
-            return self.layers[name]
-        else:
-            return self.layers[name](inputs, **arguments)
+        return self.layers[name](inputs, **arguments)  # layer是类似Dense这种的
 
     def get_inputs(self):
         raise NotImplementedError
@@ -161,11 +204,11 @@ class Transformer(object):
         if additional_input_layers is not None:
             if not isinstance(additional_input_layers, list):
                 additional_input_layers = [additional_input_layers]
-            inputs.extend(additional_input_layers)
+            inputs.extend(additional_input_layers)  # 集合中嵌套集合
 
-        self.inputs = inputs
+        self.inputs = inputs  # 影响后面的bert.model.inputs和bert.model.input
         if len(inputs) > 1:
-            self.input = inputs
+            self.input = inputs  # 设置input
         else:
             self.input = inputs[0]
 
@@ -176,7 +219,7 @@ class Transformer(object):
             outputs = [outputs]
 
         outputs = outputs[:]
-        self.outputs = outputs
+        self.outputs = outputs  # 影响后面的bert.model.outputs和bert.model.output
         if len(outputs) > 1:
             self.output = outputs
         else:
@@ -197,29 +240,15 @@ class Transformer(object):
 
         return inputs
 
-    def load_embeddings(self, embeddings):
-        """处理Embedding层权重
-        """
-        if self.keep_tokens is not None:
-            embeddings = embeddings[self.keep_tokens]
-
-        if self.compound_tokens is not None:
-            ext_embeddings = np.array([
-                embeddings[idxs].mean(0) for idxs in self.compound_tokens
-            ])
-            embeddings = np.concatenate([embeddings, ext_embeddings], 0)
-
-        return embeddings
-
     def load_variable(self, checkpoint, name):
         """加载单个变量的函数
         """
         return tf.train.load_variable(checkpoint, name)
 
     def create_variable(self, name, value):
-        """创建一个变量
+        """在tensorflow中创建一个变量
         """
-        return K.variable(self.initializer(value.shape), name=name)
+        return tf.Variable(value, name=name)
 
     def variable_mapping(self):
         """构建keras层与checkpoint的变量名之间的映射表
@@ -230,7 +259,6 @@ class Transformer(object):
         """根据mapping从checkpoint加载权重
         """
         mapping = mapping or self.variable_mapping()
-        mapping = {self.prefixed(k): v for k, v in mapping.items()}
         mapping = {k: v for k, v in mapping.items() if k in self.layers}
 
         weight_value_pairs = []
@@ -250,8 +278,8 @@ class Transformer(object):
                 head_size = self.attention_head_size
                 key_size = self.attention_key_size
                 W = np.linalg.qr(np.random.randn(key_size, head_size))[0].T
-                if layer.attention_scale:
-                    W = W * key_size**0.25 / head_size**0.25
+                if layer.scaled_dot_product:
+                    W = W * key_size ** 0.25 / head_size ** 0.25
                 for i in range(count):
                     w, v = weights[i], values[i]
                     w_shape, v_shape = K.int_shape(w), v.shape
@@ -270,139 +298,52 @@ class Transformer(object):
         """根据mapping将权重保存为checkpoint格式
         """
         mapping = mapping or self.variable_mapping()
-        mapping = {self.prefixed(k): v for k, v in mapping.items()}
         mapping = {k: v for k, v in mapping.items() if k in self.layers}
 
         with tf.Graph().as_default():
-            all_variables, all_values = [], []
             for layer, variables in mapping.items():
                 layer = self.layers[layer]
                 values = K.batch_get_value(layer.trainable_weights)
                 for name, value in zip(variables, values):
-                    all_variables.append(self.create_variable(name, value))
-                    all_values.append(value)
+                    self.create_variable(name, value)
             with tf.Session() as sess:
-                K.batch_set_value(zip(all_variables, all_values))
+                sess.run(tf.global_variables_initializer())
                 saver = tf.train.Saver()
-                saver.save(sess, filename)
-
-
-class LM_Mask(object):
-    """定义下三角Attention Mask（语言模型用）
-    """
-    def compute_attention_mask(self, inputs=None):
-        """通过idxs序列的比较来得到对应的mask
-        """
-        if self.attention_mask is None:
-
-            def lm_mask(s):
-                seq_len = K.shape(s)[1]
-                idxs = K.arange(0, seq_len)
-                mask = idxs[None, :] <= idxs[:, None]
-                mask = K.cast(mask, K.floatx())
-                return mask[None, None]
-
-            self.attention_mask = self.apply(
-                inputs=self.inputs[0],
-                layer=Lambda,
-                function=lm_mask,
-                name='Attention-LM-Mask'
-            )
-
-        return self.attention_mask
-
-
-class UniLM_Mask(object):
-    """定义UniLM的Attention Mask（Seq2Seq模型用）
-    其中source和target的分区，由segment_ids来表示。
-    UniLM: https://arxiv.org/abs/1905.03197
-    """
-    def compute_attention_mask(self, inputs=None):
-        """通过idxs序列的比较来得到对应的mask
-        """
-        if self.attention_mask is None:
-
-            def unilm_mask(s):
-                idxs = K.cumsum(s, axis=1)
-                mask = idxs[:, None, :] <= idxs[:, :, None]
-                mask = K.cast(mask, K.floatx())
-                return mask[:, None]
-
-            self.attention_mask = self.apply(
-                inputs=self.inputs[1],
-                layer=Lambda,
-                function=unilm_mask,
-                name='Attention-UniLM-Mask'
-            )
-
-        return self.attention_mask
+                saver.save(sess, filename, write_meta_graph=False)
 
 
 class BERT(Transformer):
     """构建BERT模型
     """
     def __init__(
-        self,
-        max_position,  # 序列最大长度
-        segment_vocab_size=2,  # segment总数目
-        with_pool=False,  # 是否包含Pool部分
-        with_nsp=False,  # 是否包含NSP部分
-        with_mlm=False,  # 是否包含MLM部分
-        custom_position_ids=False,  # 是否自行传入位置id
-        shared_segment_embeddings=False,  # 若True，则segment跟token共用embedding
-        **kwargs  # 其余参数
+            self,
+            max_position,  # 序列最大长度
+            with_pool=False,  # 是否包含Pool部分
+            with_nsp=False,  # 是否包含NSP部分
+            with_mlm=False,  # 是否包含MLM部分
+            **kwargs  # 其余参数
     ):
         super(BERT, self).__init__(**kwargs)
         self.max_position = max_position
-        self.segment_vocab_size = segment_vocab_size
+        self.with_pool = with_pool
         self.with_pool = with_pool
         self.with_nsp = with_nsp
         self.with_mlm = with_mlm
-        self.custom_position_ids = custom_position_ids
-        self.shared_segment_embeddings = shared_segment_embeddings
-        if self.with_nsp and not self.with_pool:
-            self.with_pool = True
 
     def get_inputs(self):
         """BERT的输入是token_ids和segment_ids
-        （但允许自行传入位置id，以实现一些特殊需求）
         """
-        x_in = self.apply(
-            layer=Input, shape=(self.sequence_length,), name='Input-Token'
-        )
-        inputs = [x_in]
-
-        if self.segment_vocab_size > 0:
-            s_in = self.apply(
-                layer=Input,
-                shape=(self.sequence_length,),
-                name='Input-Segment'
-            )
-            inputs.append(s_in)
-
-        if self.custom_position_ids:
-            p_in = self.apply(
-                layer=Input,
-                shape=(self.sequence_length,),
-                name='Input-Position'
-            )
-            inputs.append(p_in)
-
-        return inputs
+        x_in = Input(shape=(self.sequence_length,), name='Input-Token')  # shape=(btz, seq_len)
+        s_in = Input(shape=(self.sequence_length,), name='Input-Segment')  # shape=(btz, seq_len)
+        return [x_in, s_in]
 
     def apply_embeddings(self, inputs):
         """BERT的embedding是token、position、segment三者embedding之和
         """
-        inputs = inputs[:]
-        x = inputs.pop(0)
-        if self.segment_vocab_size > 0:
-            s = inputs.pop(0)
-        if self.custom_position_ids:
-            p = inputs.pop(0)
-        else:
-            p = None
-        z = self.layer_norm_conds[0]
+        x, s = inputs  # x和s均为shape=(btz, seq_len)
+        z = self.layer_norm_conds[0]  # 条件概率
 
+        # x embedding嵌入
         x = self.apply(
             inputs=x,
             layer=Embedding,
@@ -411,33 +352,31 @@ class BERT(Transformer):
             embeddings_initializer=self.initializer,
             mask_zero=True,
             name='Embedding-Token'
-        )
-        if self.segment_vocab_size > 0:
-            if self.shared_segment_embeddings:
-                name = 'Embedding-Token'
-            else:
-                name = 'Embedding-Segment'
-            s = self.apply(
-                inputs=s,
-                layer=Embedding,
-                input_dim=self.segment_vocab_size,
-                output_dim=self.embedding_size,
-                embeddings_initializer=self.initializer,
-                name=name
-            )
-            x = self.apply(
-                inputs=[x, s], layer=Add, name='Embedding-Token-Segment'
-            )
+        )  # 可以拆成四个部分：1、inputs=x 是上一个的输出； 2、layer=Embedding层函数；3、从layer一直到name之间的参数，都是层函数中的参数；4、name该层的名字，存储在self.layer中
+        # 实为Embedding(input_dim=self.vocab_size, output_dim=self.embedding_size, embeddings_initializer=self.initializer, mask_zero=True)(x)； 后面全部同理
+
+        # s embedding嵌入
+        s = self.apply(
+            inputs=s,
+            layer=Embedding,
+            input_dim=2,
+            output_dim=self.embedding_size,
+            embeddings_initializer=self.initializer,
+            name='Embedding-Segment'
+        ) # Embedding(input_dim=2,output_dim=self.embedding_size,embeddings_initializer=self.initializer)(s)
+        # x和s相加，不是通过concat
+        x = self.apply(inputs=[x, s], layer=Add, name='Embedding-Token-Segment') # Add([x, s])
+        # x和s相加后，在和位置编码相加
         x = self.apply(
-            inputs=self.simplify([x, p]),
+            inputs=x,
             layer=PositionEmbedding,
             input_dim=self.max_position,
             output_dim=self.embedding_size,
             merge_mode='add',
             embeddings_initializer=self.initializer,
-            custom_position_ids=self.custom_position_ids,
             name='Embedding-Position'
-        )
+        ) # PositionEmbedding(input_dim=self.max_position,output_dim=self.embedding_size,merge_mode='add',embeddings_initializer=self.initializer)(x)
+        # 进行LN归一化
         x = self.apply(
             inputs=self.simplify([x, z]),
             layer=LayerNormalization,
@@ -446,13 +385,15 @@ class BERT(Transformer):
             hidden_activation=self.layer_norm_conds[2],
             hidden_initializer=self.initializer,
             name='Embedding-Norm'
-        )
+        ) # LayerNormalization(conditional=(z is not None),hidden_units=self.layer_norm_conds[1],hidden_activation=self.layer_norm_conds[2],hidden_initializer=self.initializer)(self.simplify([x, z]))
+        # dropout
         x = self.apply(
             inputs=x,
             layer=Dropout,
             rate=self.dropout_rate,
             name='Embedding-Dropout'
         )
+        # 控制输出维度为(btz, seq_len, hidden_size)
         if self.embedding_size != self.hidden_size:
             x = self.apply(
                 inputs=x,
@@ -468,19 +409,19 @@ class BERT(Transformer):
         """BERT的主体是基于Self-Attention的模块
         顺序：Att --> Add --> LN --> FFN --> Add --> LN
         """
-        x = inputs
-        z = self.layer_norm_conds[0]
+        x = inputs  # shape=(btz, seq_len, 768)
+        z = self.layer_norm_conds[0] # 条件概率
 
-        attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
-        feed_forward_name = 'Transformer-%d-FeedForward' % index
-        attention_mask = self.compute_attention_mask(index)
+        attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index # Encode中每一块transformer的名字不同，代表着参数不共享了，mapping到原本bert中的每一块中
+        feed_forward_name = 'Transformer-%d-FeedForward' % index # Encode中每一块的FeedForward的名字不同。
+        attention_mask = self.compute_attention_mask() # mask
 
         # Self Attention
-        xi, x, arguments = x, [x, x, x], {'a_mask': None}
+        xi, x, arguments = x, [x, x, x], {'a_mask': None} # 注意这里的x是[x, x, x]，输入多头注意力中代表着QKV
         if attention_mask is not None:
             arguments['a_mask'] = True
             x.append(attention_mask)
-
+        # 多头注意力
         x = self.apply(
             inputs=x,
             layer=MultiHeadAttention,
@@ -490,13 +431,15 @@ class BERT(Transformer):
             key_size=self.attention_key_size,
             kernel_initializer=self.initializer,
             name=attention_name
-        )
+        ) # 相当于MultiHeadAttention(heads=self.num_attention_heads,head_size=self.attention_head_size,key_size=self.attention_key_size,kernel_initializer=self.initializer,arguments=arguments)(x)
+        # 下面每一层同理
         x = self.apply(
             inputs=x,
             layer=Dropout,
             rate=self.dropout_rate,
             name='%s-Dropout' % attention_name
         )
+        # 残差连接:将多头注意力得到的张量和一开始输入进来的x相加
         x = self.apply(
             inputs=[xi, x], layer=Add, name='%s-Add' % attention_name
         )
@@ -539,16 +482,16 @@ class BERT(Transformer):
             name='%s-Norm' % feed_forward_name
         )
 
-        return x
+        return x # 输出shape=(btz, seq_len, intermediate_size)
 
     def apply_final_layers(self, inputs):
         """根据剩余参数决定输出
         """
-        x = inputs
+        x = inputs # shape=(btz, seq_len, intermediate_size)
         z = self.layer_norm_conds[0]
-        outputs = [x]
+        outputs = [x] # outputs是一个list，在任务下游的时候可以用bert.model.output,也可以用bert.model.outputs，只是这是个list
 
-        if self.with_pool:
+        if self.with_pool or self.with_nsp:
             # Pooler部分（提取CLS向量）
             x = outputs[0]
             x = self.apply(
@@ -556,7 +499,8 @@ class BERT(Transformer):
                 layer=Lambda,
                 function=lambda x: x[:, 0],
                 name='Pooler'
-            )
+            ) # shape=(btz, intermediate_size)需要用lambda层来做，否则Keras在训练识别不出来，会报错
+            # 全连接并用激活
             pool_activation = 'tanh' if self.with_pool is True else self.with_pool
             x = self.apply(
                 inputs=x,
@@ -565,9 +509,10 @@ class BERT(Transformer):
                 activation=pool_activation,
                 kernel_initializer=self.initializer,
                 name='Pooler-Dense'
-            )
+            ) # shape=(btz, hidden_size)
             if self.with_nsp:
                 # Next Sentence Prediction部分
+                # 如果是NSP需要输出shape=(btz, 2)
                 x = self.apply(
                     inputs=x,
                     layer=Dense,
@@ -598,19 +543,13 @@ class BERT(Transformer):
                 hidden_initializer=self.initializer,
                 name='MLM-Norm'
             )
-            x = self.apply(
-                inputs=x,
-                layer=Embedding,
-                arguments={'mode': 'dense'},
-                name='Embedding-Token'
-            )
-            x = self.apply(inputs=x, layer=BiasAdd, name='MLM-Bias')
             mlm_activation = 'softmax' if self.with_mlm is True else self.with_mlm
             x = self.apply(
                 inputs=x,
-                layer=Activation,
+                layer=EmbeddingDense,
+                embedding_name='Embedding-Token',
                 activation=mlm_activation,
-                name='MLM-Activation'
+                name='MLM-Proba'
             )
             outputs.append(x)
 
@@ -621,7 +560,7 @@ class BERT(Transformer):
         else:
             outputs = outputs[1:]
 
-        return outputs
+        return outputs # 由pool，nsp，mlm的T/F决定，全没有的话，就直接输出shape=(btz, seq_len, intermediate_size)
 
     def load_variable(self, checkpoint, name):
         """加载单个变量的函数
@@ -631,7 +570,10 @@ class BERT(Transformer):
             'bert/embeddings/word_embeddings',
             'cls/predictions/output_bias',
         ]:
-            return self.load_embeddings(variable)
+            if self.keep_tokens is None:
+                return variable
+            else:
+                return variable[self.keep_tokens]
         elif name == 'cls/seq_relationship/output_weights':
             return variable.T
         else:
@@ -675,7 +617,7 @@ class BERT(Transformer):
                 'cls/predictions/transform/LayerNorm/beta',
                 'cls/predictions/transform/LayerNorm/gamma',
             ],
-            'MLM-Bias': ['cls/predictions/output_bias'],
+            'MLM-Proba': ['cls/predictions/output_bias'],
         }
 
         for i in range(self.num_hidden_layers):
@@ -713,6 +655,7 @@ class BERT(Transformer):
 class ALBERT(BERT):
     """构建ALBERT模型
     """
+
     def apply_main_layers(self, inputs, index):
         """ALBERT的主体是基于Self-Attention的模块
         顺序：Att --> Add --> LN --> FFN --> Add --> LN
@@ -722,7 +665,7 @@ class ALBERT(BERT):
 
         attention_name = 'Transformer-MultiHeadSelfAttention'
         feed_forward_name = 'Transformer-FeedForward'
-        attention_mask = self.compute_attention_mask(index)
+        attention_mask = self.compute_attention_mask(0)
 
         # Self Attention
         xi, x, arguments = x, [x, x, x], {'a_mask': None}
@@ -829,6 +772,7 @@ class ALBERT(BERT):
 class ALBERT_Unshared(BERT):
     """解开ALBERT共享约束，当成BERT用
     """
+
     def variable_mapping(self):
         """映射到官方ALBERT权重格式
         """
@@ -870,13 +814,11 @@ class NEZHA(BERT):
     """华为推出的NAZHA模型
     链接：https://arxiv.org/abs/1909.00204
     """
+
     def apply_embeddings(self, inputs):
         """NEZHA的embedding是token、segment两者embedding之和
         """
-        inputs = inputs[:]
-        x = inputs.pop(0)
-        if self.segment_vocab_size > 0:
-            s = inputs.pop(0)
+        x, s = inputs
         z = self.layer_norm_conds[0]
 
         x = self.apply(
@@ -888,22 +830,15 @@ class NEZHA(BERT):
             mask_zero=True,
             name='Embedding-Token'
         )
-        if self.segment_vocab_size > 0:
-            if self.shared_segment_embeddings:
-                name = 'Embedding-Token'
-            else:
-                name = 'Embedding-Segment'
-            s = self.apply(
-                inputs=s,
-                layer=Embedding,
-                input_dim=2,
-                output_dim=self.embedding_size,
-                embeddings_initializer=self.initializer,
-                name=name
-            )
-            x = self.apply(
-                inputs=[x, s], layer=Add, name='Embedding-Token-Segment'
-            )
+        s = self.apply(
+            inputs=s,
+            layer=Embedding,
+            input_dim=2,
+            output_dim=self.embedding_size,
+            embeddings_initializer=self.initializer,
+            name='Embedding-Segment'
+        )
+        x = self.apply(inputs=[x, s], layer=Add, name='Embedding-Token-Segment')
         x = self.apply(
             inputs=self.simplify([x, z]),
             layer=LayerNormalization,
@@ -939,7 +874,7 @@ class NEZHA(BERT):
 
         attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
         feed_forward_name = 'Transformer-%d-FeedForward' % index
-        attention_mask = self.compute_attention_mask(index)
+        attention_mask = self.compute_attention_mask()
         position_bias = self.compute_position_bias(x)
 
         # Self Attention
@@ -1044,50 +979,22 @@ class ELECTRA(BERT):
     """Google推出的ELECTRA模型
     链接：https://arxiv.org/abs/2003.10555
     """
-    @insert_arguments(with_discriminator=False)
+
     @delete_arguments('with_pool', 'with_mlm')
     def __init__(
-        self,
-        max_position,  # 序列最大长度
-        **kwargs  # 其余参数
+            self,
+            max_position,  # 序列最大长度
+            **kwargs  # 其余参数
     ):
+        if 'keep_tokens' in kwargs:
+            del kwargs['keep_tokens']
+
         super(ELECTRA, self).__init__(max_position, **kwargs)
 
     def apply_final_layers(self, inputs):
         x = inputs
-
-        if self.with_discriminator:
-            if self.with_discriminator is True:
-                final_activation = 'sigmoid'
-            else:
-                final_activation = self.with_discriminator
-            x = self.apply(
-                inputs=x,
-                layer=Dense,
-                units=self.hidden_size,
-                activation=self.hidden_act,
-                kernel_initializer=self.initializer,
-                name='Discriminator-Dense'
-            )
-            x = self.apply(
-                inputs=x,
-                layer=Dense,
-                units=1,
-                activation=final_activation,
-                kernel_initializer=self.initializer,
-                name='Discriminator-Prediction'
-            )
-
+        z = self.layer_norm_conds[0]
         return x
-
-    def load_variable(self, checkpoint, name):
-        """加载单个变量的函数
-        """
-        variable = super(ELECTRA, self).load_variable(checkpoint, name)
-        if name == 'electra/embeddings/word_embeddings':
-            return self.load_embeddings(variable)
-        else:
-            return variable
 
     def variable_mapping(self):
         mapping = super(ELECTRA, self).variable_mapping()
@@ -1099,146 +1006,28 @@ class ELECTRA(BERT):
             k: [i.replace('bert/', 'electra/') for i in v]
             for k, v in mapping.items()
         }
-        mapping['Discriminator-Dense'] = [
-            'discriminator_predictions/dense/kernel',
-            'discriminator_predictions/dense/bias',
-        ]
-        mapping['Discriminator-Prediction'] = [
-            'discriminator_predictions/dense_1/kernel',
-            'discriminator_predictions/dense_1/bias',
-        ]
         return mapping
 
 
-class GPT_OpenAI(LM_Mask, BERT):
-    """构建GPT模型
-    链接：https://github.com/openai/finetune-transformer-lm
-    """
-    @insert_arguments(final_activation='softmax')
-    @delete_arguments('with_pool', 'with_mlm')
-    def __init__(self, **kwargs):
-        super(GPT_OpenAI, self).__init__(**kwargs)
-
-    def apply_embeddings(self, inputs):
-        """GPT的embedding是token、position、segment三者embedding之和
-        跟BERT的主要区别是三者相加之后没有加LayerNormalization层。
-        """
-        inputs = inputs[:]
-        x = inputs.pop(0)
-        if self.segment_vocab_size > 0:
-            s = inputs.pop(0)
-        if self.custom_position_ids:
-            p = inputs.pop(0)
-        else:
-            p = None
-
-        x = self.apply(
-            inputs=x,
-            layer=Embedding,
-            input_dim=self.vocab_size,
-            output_dim=self.embedding_size,
-            embeddings_initializer=self.initializer,
-            mask_zero=True,
-            name='Embedding-Token'
-        )
-        if self.segment_vocab_size > 0:
-            if self.shared_segment_embeddings:
-                name = 'Embedding-Token'
-            else:
-                name = 'Embedding-Segment'
-            s = self.apply(
-                inputs=s,
-                layer=Embedding,
-                input_dim=self.segment_vocab_size,
-                output_dim=self.embedding_size,
-                embeddings_initializer=self.initializer,
-                name=name
-            )
-            x = self.apply(
-                inputs=[x, s], layer=Add, name='Embedding-Token-Segment'
-            )
-        x = self.apply(
-            inputs=self.simplify([x, p]),
-            layer=PositionEmbedding,
-            input_dim=self.max_position,
-            output_dim=self.embedding_size,
-            merge_mode='add',
-            embeddings_initializer=self.initializer,
-            custom_position_ids=self.custom_position_ids,
-            name='Embedding-Position'
-        )
-        x = self.apply(
-            inputs=x,
-            layer=Dropout,
-            rate=self.dropout_rate,
-            name='Embedding-Dropout'
-        )
-        if self.embedding_size != self.hidden_size:
-            x = self.apply(
-                inputs=x,
-                layer=Dense,
-                units=self.hidden_size,
-                kernel_initializer=self.initializer,
-                name='Embedding-Mapping'
-            )
-
-        return x
-
-    def apply_final_layers(self, inputs):
-        """剩余部分
-        """
-        x = inputs
-
-        # Language Model部分
-        x = self.apply(
-            inputs=x,
-            layer=Embedding,
-            arguments={'mode': 'dense'},
-            name='Embedding-Token'
-        )
-        x = self.apply(
-            inputs=x,
-            layer=Activation,
-            activation=self.final_activation,
-            name='LM-Activation'
-        )
-
-        return x
-
-    def variable_mapping(self):
-        """映射到TF版GPT权重格式
-        """
-        mapping = super(GPT_OpenAI, self).variable_mapping()
-        mapping = {
-            k: [
-                i.replace('bert/', 'gpt/').replace('encoder', 'transformer')
-                for i in v
-            ]
-            for k, v in mapping.items()
-        }
-        return mapping
-
-
-class GPT2_ML(LM_Mask, Transformer):
+class GPT2_ML(Transformer):
     """构建GPT2_ML模型
     链接: https://github.com/imcaspar/gpt2-ml
     """
+
     def __init__(
-        self,
-        max_position,  # 序列最大长度
-        final_activation='softmax',  # 预测分布的激活函数
-        **kwargs  # 其余参数
+            self,
+            max_position,  # 序列最大长度
+            final_activation='softmax',  # 预测分布的激活函数
+            **kwargs  # 其余参数
     ):
         super(GPT2_ML, self).__init__(**kwargs)
         self.max_position = max_position
         self.final_activation = final_activation
 
     def get_inputs(self):
-        """GPT2_ML的输入是token_ids
+        """GPT2_ML的输入是token_ids和segment_ids
         """
-        x_in = self.apply(
-            layer=Input, shape=(self.sequence_length,), name='Input-Token'
-        )
+        x_in = Input(shape=(self.sequence_length,), name='Input-Token')
         return x_in
 
     def apply_embeddings(self, inputs):
@@ -1295,7 +1084,7 @@ class GPT2_ML(LM_Mask, Transformer):
 
         attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
         feed_forward_name = 'Transformer-%d-FeedForward' % index
-        attention_mask = self.compute_attention_mask(index)
+        attention_mask = self.compute_attention_mask()
 
         # Self Attention
         xi, x, arguments = x, [x, x, x, attention_mask], {'a_mask': True}
@@ -1366,19 +1155,15 @@ class GPT2_ML(LM_Mask, Transformer):
         """剩余部分
         """
         x = inputs
+        z = self.layer_norm_conds[0]
 
         # Language Model部分
         x = self.apply(
             inputs=x,
-            layer=Embedding,
-            arguments={'mode': 'dense'},
-            name='Embedding-Token'
-        )
-        x = self.apply(
-            inputs=x,
-            layer=Activation,
+            layer=EmbeddingDense,
+            embedding_name='Embedding-Token',
             activation=self.final_activation,
-            name='LM-Activation'
+            name='LM-Proba'
         )
 
         return x
@@ -1388,9 +1173,33 @@ class GPT2_ML(LM_Mask, Transformer):
         """
         variable = super(GPT2_ML, self).load_variable(checkpoint, name)
         if name == 'newslm/embeddings/word_embed':
-            return self.load_embeddings(variable)
+            if self.keep_tokens is None:
+                return variable
+            else:
+                return variable[self.keep_tokens]
         else:
             return variable
+
+    def compute_attention_mask(self, inputs=None):
+        """添加下三角形式的attention mask
+        """
+        if self.attention_mask is None:
+            def lm_mask(s):
+                import tensorflow as tf
+                seq_len = K.shape(s)[1]
+                with K.name_scope('attention_mask'):
+                    ones = K.ones((1, 1, seq_len, seq_len))
+                a_mask = tf.linalg.band_part(ones, -1, 0)
+                return a_mask
+
+            self.attention_mask = self.apply(
+                inputs=self.inputs[0],
+                layer=Lambda,
+                function=lm_mask,
+                name='Attention-LM-Mask'
+            )
+
+        return self.attention_mask
 
     def variable_mapping(self):
         """映射到官方GPT2_ML权重格式
@@ -1439,12 +1248,16 @@ class GPT2_ML(LM_Mask, Transformer):
 class T5_Base(Transformer):
     """Google的T5模型（基类）
     """
+
     def load_variable(self, checkpoint, name):
         """加载单个变量的函数
         """
         variable = super(T5_Base, self).load_variable(checkpoint, name)
         if name == 'shared/embedding':
-            return self.load_embeddings(variable)
+            if self.keep_tokens is None:
+                return variable
+            else:
+                return variable[self.keep_tokens]
         elif 'relative_attention_bias' in name:
             return variable.T
         else:
@@ -1529,14 +1342,11 @@ class T5_Base(Transformer):
 class T5_Encoder(T5_Base):
     """Google的T5模型（Encoder）
     """
+
     def get_inputs(self):
         """T5的Encoder的输入只有token_ids
         """
-        x_in = self.apply(
-            layer=Input,
-            shape=(self.sequence_length,),
-            name='Encoder-Input-Token'
-        )
+        x_in = Input(shape=(self.sequence_length,), name='Encoder-Input-Token')
         return x_in
 
     def apply_embeddings(self, inputs):
@@ -1580,7 +1390,7 @@ class T5_Encoder(T5_Base):
 
         attention_name = 'Encoder-Transformer-%d-MultiHeadSelfAttention' % index
         feed_forward_name = 'Encoder-Transformer-%d-FeedForward' % index
-        attention_mask = self.compute_attention_mask(index)
+        attention_mask = self.compute_attention_mask()
         position_bias = self.compute_position_bias(x)
 
         # Self Attention
@@ -1604,7 +1414,7 @@ class T5_Encoder(T5_Base):
             head_size=self.attention_head_size,
             key_size=self.attention_key_size,
             use_bias=False,
-            attention_scale=False,
+            scaled_dot_product=False,
             kernel_initializer=self.initializer,
             name=attention_name
         )
@@ -1682,7 +1492,6 @@ class T5_Encoder(T5_Base):
         """T5相对位置编码
         """
         if self.position_bias is None:
-
             x = inputs
             p = self.apply(
                 inputs=[x, x],
@@ -1698,26 +1507,25 @@ class T5_Encoder(T5_Base):
         return self.position_bias
 
 
-class T5_Decoder(LM_Mask, T5_Base):
+class T5_Decoder(Transformer):
     """Google的T5模型（Decoder）
     """
+
     def __init__(self, with_lm=True, **kwargs):
         super(T5_Decoder, self).__init__(**kwargs)
-        self.with_lm = with_lm
+        if with_lm is True:
+            self.with_lm = 'softmax'
+        else:
+            self.with_lm = with_lm
 
     def get_inputs(self):
         """T5的Decoder的输入为context序列和token_ids
         """
-        c_in = self.apply(
-            layer=Input,
+        c_in = Input(
             shape=(self.sequence_length, self.hidden_size),
             name='Input-Context'
         )
-        x_in = self.apply(
-            layer=Input,
-            shape=(self.sequence_length,),
-            name='Decoder-Input-Token'
-        )
+        x_in = Input(shape=(self.sequence_length,), name='Decoder-Input-Token')
         return [c_in, x_in]
 
     def apply_embeddings(self, inputs):
@@ -1762,7 +1570,7 @@ class T5_Decoder(LM_Mask, T5_Base):
         self_attention_name = 'Decoder-Transformer-%d-MultiHeadSelfAttention' % index
         cross_attention_name = 'Decoder-Transformer-%d-MultiHeadCrossAttention' % index
         feed_forward_name = 'Decoder-Transformer-%d-FeedForward' % index
-        attention_mask = self.compute_attention_mask(index)
+        attention_mask = self.compute_attention_mask()
         position_bias = self.compute_position_bias([x, c])
 
         # Self Attention
@@ -1789,7 +1597,7 @@ class T5_Decoder(LM_Mask, T5_Base):
             head_size=self.attention_head_size,
             key_size=self.attention_key_size,
             use_bias=False,
-            attention_scale=False,
+            scaled_dot_product=False,
             kernel_initializer=self.initializer,
             name=self_attention_name
         )
@@ -1827,7 +1635,7 @@ class T5_Decoder(LM_Mask, T5_Base):
             head_size=self.attention_head_size,
             key_size=self.attention_key_size,
             use_bias=False,
-            attention_scale=False,
+            scaled_dot_product=False,
             kernel_initializer=self.initializer,
             name=cross_attention_name
         )
@@ -1917,25 +1725,40 @@ class T5_Decoder(LM_Mask, T5_Base):
                 )
             x = self.apply(
                 inputs=x,
-                layer=Embedding,
-                arguments={'mode': 'dense'},
-                name='Embedding-Token'
-            )
-            lm_activation = 'softmax' if self.with_lm is True else self.with_lm
-            x = self.apply(
-                inputs=x,
-                layer=Activation,
-                activation=lm_activation,
-                name='Dencoder-Output-LM-Activation'
+                layer=EmbeddingDense,
+                embedding_name='Embedding-Token',
+                activation=self.with_lm,
+                use_bias=False,
+                name='Dencoder-Output-LM-Proba'
             )
 
         return x
+
+    def compute_attention_mask(self, inputs=None):
+        """添加下三角形式的attention mask
+        """
+        if self.attention_mask is None:
+            def lm_mask(s):
+                import tensorflow as tf
+                seq_len = K.shape(s)[1]
+                with K.name_scope('attention_mask'):
+                    ones = K.ones((1, 1, seq_len, seq_len))
+                a_mask = tf.linalg.band_part(ones, -1, 0)
+                return a_mask
+
+            self.attention_mask = self.apply(
+                inputs=self.inputs[1],
+                layer=Lambda,
+                function=lm_mask,
+                name='Attention-LM-Mask'
+            )
+
+        return self.attention_mask
 
     def compute_position_bias(self, inputs=None):
         """T5相对位置编码
         """
         if self.position_bias is None:
-
             x, c = inputs
             p1 = self.apply(
                 inputs=[x, x],
@@ -1963,6 +1786,7 @@ class T5_Decoder(LM_Mask, T5_Base):
 class T5(T5_Base):
     """Google的T5模型（Encoder-Decoder）
     """
+
     def __init__(self, **kwargs):
         super(T5, self).__init__(**kwargs)
         kwargs['layers'] = self.layers
@@ -1991,37 +1815,86 @@ class T5(T5_Base):
 def extend_with_language_model(BaseModel):
     """添加下三角的Attention Mask（语言模型用）
     """
-    class LanguageModel(LM_Mask, BaseModel):
+
+    class LanguageModel(BaseModel):
         """带下三角Attention Mask的派生模型
         """
+
         def __init__(self, *args, **kwargs):
             super(LanguageModel, self).__init__(*args, **kwargs)
             self.with_mlm = self.with_mlm or True
+
+        def compute_attention_mask(self, inputs=None):
+            """重载此函数即可
+            """
+            if self.attention_mask is None:
+                def lm_mask(s):
+                    import tensorflow as tf
+                    seq_len = K.shape(s)[1]
+                    with K.name_scope('attention_mask'):
+                        ones = K.ones((1, 1, seq_len, seq_len))
+                    a_mask = tf.linalg.band_part(ones, -1, 0)
+                    return a_mask
+
+                self.attention_mask = self.apply(
+                    inputs=self.inputs[1],
+                    layer=Lambda,
+                    function=lm_mask,
+                    name='Attention-LM-Mask'
+                )
+
+            return self.attention_mask
 
     return LanguageModel
 
 
 def extend_with_unified_language_model(BaseModel):
-    """添加UniLM的Attention Mask（Seq2Seq模型用）
+    """添加UniLM的Attention Mask（UnifiedLanguageModel用）
     """
-    class UnifiedLanguageModel(UniLM_Mask, BaseModel):
+
+    class UnifiedLanguageModel(BaseModel):
         """带UniLM的Attention Mask的派生模型
         UniLM: https://arxiv.org/abs/1905.03197
         """
+
         def __init__(self, *args, **kwargs):
             super(UnifiedLanguageModel, self).__init__(*args, **kwargs)
             self.with_mlm = self.with_mlm or True
+
+        def compute_attention_mask(self, inputs=None):
+            """重载此函数即可
+            """
+            if self.attention_mask is None:
+                def unilm_mask(s):
+                    import tensorflow as tf
+                    seq_len = K.shape(s)[1]
+                    with K.name_scope('attention_mask'):
+                        ones = K.ones((1, 1, seq_len, seq_len))
+                    a_mask = tf.linalg.band_part(ones, -1, 0)
+                    s_ex12 = K.expand_dims(K.expand_dims(s, 1), 2)
+                    s_ex13 = K.expand_dims(K.expand_dims(s, 1), 3)
+                    a_mask = (1 - s_ex13) * (1 - s_ex12) + s_ex13 * a_mask
+                    return a_mask
+
+                self.attention_mask = self.apply(
+                    inputs=self.inputs[1],
+                    layer=Lambda,
+                    function=unilm_mask,
+                    name='Attention-UniLM-Mask'
+                )
+
+            return self.attention_mask
 
     return UnifiedLanguageModel
 
 
 def build_transformer_model(
-    config_path=None,
-    checkpoint_path=None,
-    model='bert',
-    application='encoder',
-    return_keras_model=True,
-    **kwargs
+        config_path=None,
+        checkpoint_path=None,
+        model='bert',
+        application='encoder',
+        return_keras_model=True,
+        **kwargs
 ):
     """根据配置文件构建模型，可选加载checkpoint权重
     """
@@ -2030,43 +1903,28 @@ def build_transformer_model(
         configs.update(json.load(open(config_path)))
     configs.update(kwargs)
     if 'max_position' not in configs:
-        configs['max_position'] = configs.get('max_position_embeddings', 512)
+        configs['max_position'] = configs.get('max_position_embeddings')
     if 'dropout_rate' not in configs:
         configs['dropout_rate'] = configs.get('hidden_dropout_prob')
-    if 'segment_vocab_size' not in configs:
-        configs['segment_vocab_size'] = configs.get('type_vocab_size', 2)
+
+    model, application = model.lower(), application.lower()
 
     models = {
         'bert': BERT,
         'albert': ALBERT,
         'albert_unshared': ALBERT_Unshared,
-        'roberta': BERT,
         'nezha': NEZHA,
         'electra': ELECTRA,
-        'gpt_openai': GPT_OpenAI,
         'gpt2_ml': GPT2_ML,
         't5': T5,
-        't5_encoder': T5_Encoder,
-        't5_decoder': T5_Decoder,
     }
+    MODEL = models[model]
 
-    if is_string(model):
-        model = model.lower()
-        MODEL = models[model]
-    else:
-        MODEL = model
-
-    application = application.lower()
-    if application in ['lm', 'unilm'] and model in ['electra', 't5']:
-        raise ValueError(
-            '"%s" model can not be used as "%s" application.\n' %
-            (model, application)
-        )
-
-    if application == 'lm':
-        MODEL = extend_with_language_model(MODEL)
-    elif application == 'unilm':
-        MODEL = extend_with_unified_language_model(MODEL)
+    if model != 't5':
+        if application == 'lm':
+            MODEL = extend_with_language_model(MODEL)
+        elif application == 'unilm':
+            MODEL = extend_with_unified_language_model(MODEL)
 
     transformer = MODEL(**configs)
     transformer.build(**configs)
