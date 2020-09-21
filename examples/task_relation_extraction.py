@@ -87,50 +87,53 @@ def search(pattern, sequence):
     return -1
 
 # {'text': '如何演好自己的角色，请读《演员自我修养》《喜剧之王》周星驰崛起于穷困潦倒之中的独门秘笈', 'spo_list': [('喜剧之王', '主演', '周星驰')]}
+# data_generator根据建模时的input来制作，模型中的subject_labels，subject_ids，object_labels均需在这里制作输入，具体各自的shape如下：
 # subject_labels:(?, ?, 2)  subject_ids:(?, 2)   object_labels:(?, ?, 49, 2) 在没进入batch前不用管第一维
 class data_generator(DataGenerator):
     """数据生成器
     """
+
     def __iter__(self, random=False):
         idxs = list(range(len(self.data)))
-        if random:
+        if random:  # 随机打乱
             np.random.shuffle(idxs)
         batch_token_ids, batch_segment_ids = [], []
         batch_subject_labels, batch_subject_ids, batch_object_labels = [], [], []
         for i in idxs:
-            d = self.data[i]
-            token_ids, segment_ids = tokenizer.encode(d['text'], maxlen=maxlen)
+            d = self.data[i]  # 取出一条数据
+            token_ids, segment_ids = tokenizer.encode(d['text'], maxlen=maxlen)  # 常规准备预测数据做法
             # 整理三元组 batch_subject_labels, batch_subject_ids, batch_object_labels 转成Input需要的格式 {s: [(o, p)]}
             spoes = {}
             for s, p, o in d['spo_list']:
-                s = tokenizer.encode(s)[0][1:-1]
+                s = tokenizer.encode(s)[0][1:-1] # [0]表示subject的encode只取token，segment不加入，同时[1:-1]去头去尾，只取s主体id
                 p = predicate2id[p]
-                o = tokenizer.encode(o)[0][1:-1]
-                s_idx = search(s, token_ids)
-                o_idx = search(o, token_ids)
+                o = tokenizer.encode(o)[0][1:-1] # 同上述s
+                s_idx = search(s, token_ids) # 检索s在text的开头位置
+                o_idx = search(o, token_ids) # 检索o在text的开头位置
                 if s_idx != -1 and o_idx != -1:
-                    s = (s_idx, s_idx + len(s) - 1)
-                    o = (o_idx, o_idx + len(o) - 1, p)
+                    s = (s_idx, s_idx + len(s) - 1) # s开头和结尾位置id
+                    o = (o_idx, o_idx + len(o) - 1, p) # o开头和结尾位置id，和p的id
                     if s not in spoes:
                         spoes[s] = []
                     spoes[s].append(o)
             if spoes:
-                # subject标签
+                # subject标签 没入btz前 shape=(seq_len, 2)
                 subject_labels = np.zeros((len(token_ids), 2))
                 for s in spoes:
-                    subject_labels[s[0], 0] = 1
-                    subject_labels[s[1], 1] = 1
+                    subject_labels[s[0], 0] = 1 # s[0]:subject开始位置的id， 0：表示开头的那一行
+                    subject_labels[s[1], 1] = 1 # s[1]:subject结束位置的id， 1：表示结尾的那一行
                 # 随机选一个subject
                 start, end = np.array(list(spoes.keys())).T
                 start = np.random.choice(start)
-                end = np.random.choice(end[end >= start]) # end >= start 表示用[False,True]来看能不能选，但是这样随机会选到后面的数，导致不是一个真的subject  为什么要这么麻烦呢
+                end = np.random.choice(
+                    end[end >= start])  # end >= start 表示用[False,True]来看能不能选，但是这样随机会选到后面的数，导致不是一个真的subject  为什么要这么麻烦呢
                 subject_ids = (start, end)
-                # 对应的object标签
+                # 对应的object标签  没入btz前  shape=(seq_len, len(predicate2id), 2)
                 object_labels = np.zeros((len(token_ids), len(predicate2id), 2))
-                for o in spoes.get(subject_ids, []): # {(2,4):[(3,5,8)]}
-                    object_labels[o[0], o[2], 0] = 1
-                    object_labels[o[1], o[2], 1] = 1
-                # 构建batch
+                for o in spoes.get(subject_ids, []):  # {(2,4):[(3,5,8)]}
+                    object_labels[o[0], o[2], 0] = 1 # o[0]:object开头的位置id， o[2]：对应predict的id， 0：表示开头的那一行
+                    object_labels[o[1], o[2], 1] = 1 # o[1]:object结尾的位置id， o[2]：对应predict的id， 1：表示结尾的那一行
+                # 构建batch 每一个shape都加一个btz维度
                 batch_token_ids.append(token_ids)
                 batch_segment_ids.append(segment_ids)
                 batch_subject_labels.append(subject_labels)
@@ -141,11 +144,12 @@ class data_generator(DataGenerator):
                     batch_segment_ids = sequence_padding(batch_segment_ids)
                     batch_subject_labels = sequence_padding(batch_subject_labels, padding=np.zeros(2))
                     batch_subject_ids = np.array(batch_subject_ids)
-                    batch_object_labels = sequence_padding(batch_object_labels, padding=np.zeros((len(predicate2id), 2)))
+                    batch_object_labels = sequence_padding(batch_object_labels,
+                                                           padding=np.zeros((len(predicate2id), 2)))
                     yield [
-                        batch_token_ids, batch_segment_ids,
-                        batch_subject_labels, batch_subject_ids, batch_object_labels
-                    ], None
+                              batch_token_ids, batch_segment_ids,
+                              batch_subject_labels, batch_subject_ids, batch_object_labels
+                          ], None # []表示input，在[]外面的表示的是预测的结果，模型自动的做loss。
                     batch_token_ids, batch_segment_ids = [], []
                     batch_subject_labels, batch_subject_ids, batch_object_labels = [], [], []
 
@@ -258,22 +262,24 @@ def extract_spoes(text):
     """抽取输入text所包含的三元组
     """
     tokens = tokenizer.tokenize(text, maxlen=maxlen)
-    token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
+    token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)  # 为预测准备数据
     # 抽取subject
-    subject_preds = subject_model.predict([[token_ids], [segment_ids]])
-    start = np.where(subject_preds[0, :, 0] > 0.6)[0]
+    subject_preds = subject_model.predict([[token_ids], [segment_ids]])  # （btz, seq, 2） btz=1
+    # 第一个0表示的是预测的时候btz只要一个，故取0； 最后的[0]表示的是嵌套了一层，取出来
+    start = np.where(subject_preds[0, :, 0] > 0.6)[0]  # np.where作用：输出得出元素的坐标，位置id；[0]表示取第一个btz
     end = np.where(subject_preds[0, :, 1] > 0.5)[0]
     subjects = []
     for i in start:
         j = end[end >= i]
         if len(j) > 0:
             j = j[0]
-            subjects.append((i, j))
+            subjects.append((i, j))  # 得到subjects
     if subjects:
         spoes = []
-        token_ids = np.repeat([token_ids], len(subjects), 0)
+        token_ids = np.repeat([token_ids], len(subjects),
+                              0)  # 因为subjects中有多个，为了配合含有多个的subjects ，故在y轴，也就是行重复多次；也就object_model中的btz概念
         segment_ids = np.repeat([segment_ids], len(subjects), 0)
-        subjects = np.array(subjects)
+        subjects = np.array(subjects)  # 从[(),()]转成[[],[]]矩阵模式
         # 传入subject，抽取object和predicate
         object_preds = object_model.predict([token_ids, segment_ids, subjects])
         for subject, object_pred in zip(subjects, object_preds):
@@ -293,6 +299,7 @@ def extract_spoes(text):
         ]
     else:
         return []
+
 
 
 class SPO(tuple):
