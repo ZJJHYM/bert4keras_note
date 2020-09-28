@@ -10,7 +10,8 @@
   - bert4keras链接：https://github.com/bojone/bert4keras
 
 ## 说明
-bert4keras_expl：对bert4keras的源码进行详解，建议先看源码，才会更好的了解和使用它。可参考详解：
+
+bert4keras_expl：对bert4keras的源码进行详解，在用Bert做相关任务建议先看源码，觉得源码太多的，只要看该文件夹中的主脚本：models.py，这样会更好的了解和使用它。详解可以参看文章：https://zhuanlan.zhihu.com/p/250558413
 
 examples：对苏神中各个任务的实现原理和矩阵运算进行详解
 
