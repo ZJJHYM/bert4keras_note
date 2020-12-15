@@ -1,5 +1,5 @@
-# https://kexue.fm/archives/5861
-# 苏剑林的
+# 更多详解看：https://zhuanlan.zhihu.com/p/336772860
+# 卓俊杰
 # ! -*- coding: utf-8 -*-
 
 import numpy as np
